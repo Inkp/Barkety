@@ -4,22 +4,24 @@ name := "barkety"
 
 version := "3.2.0"
 
-scalaVersion := "2.9.0"
+scalaVersion := "2.11.6"
 
 scalacOptions ++= Seq("-unchecked", "-deprecation")
 
 resolvers += "Glassfish" at "http://maven.glassfish.org/content/repositories/maven.hudson-labs.org"
 
 libraryDependencies ++= Seq(
-  "org.scalatest" %% "scalatest" % "1.6.1",
-  "org.mockito" % "mockito-core" % "1.8.5"
+  "org.scalatest" %% "scalatest" % "2.2.4",
+  "org.mockito" % "mockito-core" % "2.0.13-beta"
   ) map { _ % "test" }
 
-libraryDependencies ++= Seq("actor") map { "se.scalablesolutions.akka" % "akka-%s".format(_) % "1.2" }
+libraryDependencies ++= Seq("actor") map { "com.typesafe.akka" %% "akka-%s".format(_) % "2.3.11" }
 
-libraryDependencies ++= Seq("testkit") map { "se.scalablesolutions.akka" % "akka-%s".format(_) % "1.2" % "test" }
+libraryDependencies ++= Seq("testkit") map { "com.typesafe.akka" %% "akka-%s".format(_) % "2.3.11" % "test" }
 
-libraryDependencies ++= Seq("smack", "smackx") map { "jivesoftware" % _ % "3.2.0" }
+libraryDependencies ++= Seq("smack-java7", "smack-tcp", "smack-extensions") map { "org.igniterealtime.smack" % _ % "4.1.1" }
+
+libraryDependencies ++= Seq("com.typesafe.scala-logging" %% "scala-logging-slf4j" % "2.1.2")
 
 initialCommands := """
 import akka.actor._

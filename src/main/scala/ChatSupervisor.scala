@@ -1,13 +1,15 @@
 package us.troutwine.barkety
 
-import akka.actor.{Actor,ActorRef}
-import akka.event.{EventHandler => log}
-import akka.config.Supervision.AllForOneStrategy
+import akka.actor.{Props, AllForOneStrategy, Actor, ActorRef}
+import com.typesafe.scalalogging.slf4j.Logger
+import org.jivesoftware.smack.chat.{ChatManager, ChatMessageListener, ChatManagerListener, Chat}
+import org.jivesoftware.smack.packet.{Presence, Message}
+import org.jivesoftware.smack.roster.Roster
+import org.jivesoftware.smack.tcp.{XMPPTCPConnectionConfiguration, XMPPTCPConnection}
+import org.jivesoftware.smackx.muc.{MultiUserChatManager, DiscussionHistory, MultiUserChat}
+import org.slf4j.LoggerFactory
 import scala.collection.mutable
-import org.jivesoftware.smack.{XMPPConnection,ChatManagerListener,Chat}
-import org.jivesoftware.smack.{MessageListener,Roster,ConnectionConfiguration, PacketListener}
-import org.jivesoftware.smack.packet.{Message,Packet,Presence}
-import org.jivesoftware.smackx.muc.{MultiUserChat,DiscussionHistory}
+import org.jivesoftware.smack._
 
 private sealed abstract class InternalMessage
 private case class RemoteChatCreated(jid:JID,chat:Chat) extends InternalMessage
@@ -20,28 +22,32 @@ case class InboundMessage(msg:String) extends Memo
 case class OutboundMessage(msg:String) extends Memo
 case class JoinRoom(room: JID, nickname: Option[String] = None, roomPassword: Option[String] = None) extends Memo
 
+object logger {
+  val log = Logger(LoggerFactory.getLogger("name")) //TODO: logging
+}
+import logger._
 private class ChatListener(parent:ActorRef) extends ChatManagerListener {
   override def chatCreated(chat:Chat, createdLocally:Boolean) = {
     val jid:JID = JID(chat.getParticipant)
     if (createdLocally)
-      log.info(this,"A local chat with %s was created.".format(jid))
+      log.info("A local chat with %s was created.".format(jid))
     else {
-      log.info(this,"%s has begun to chat with us.".format(jid))
+      log.info("%s has begun to chat with us.".format(jid))
       parent ! RemoteChatCreated(jid, chat)
     }
   }
 }
 
-private class MsgListener(parent:ActorRef) extends MessageListener {
-  override def processMessage(chat:Chat,msg:Message) = {
+private class MsgListener(parent:ActorRef) extends ChatMessageListener {
+  override def processMessage(chat: Chat, msg:Message) = {
     if (msg.getBody != null)
       parent ! ReceivedMessage(msg.getBody)
   }
 }
 
-private class MsgLogger extends MessageListener {
-  override def processMessage(chat:Chat,msg:Message) = {
-    log.info(this, "INBOUND %s --> %s : %s".format(chat.getParticipant,
+private class MsgLogger extends ChatMessageListener {
+  override def processMessage(chat: Chat, msg:Message) = {
+    log.info("INBOUND %s --> %s : %s".format(chat.getParticipant,
                                                    chat.getThreadID,
                                                    msg.getBody))
   }
@@ -65,13 +71,9 @@ private class Chatter(chat:Chat, roster:Roster) extends Actor {
 }
 
 class RoomChatter(muc: MultiUserChat, nickname: String, password: Option[String] = None) extends Actor {
-  muc.addMessageListener(new PacketListener() {
-    def processPacket(packet: Packet) {
-      packet match {
-        case msg: Message =>
-          if (msg.getBody != null)
-            self ! ReceivedMessage(msg.getBody)
-      }
+  muc.addMessageListener(new MessageListener() {
+    def processMessage(msg: Message) {
+      self ! ReceivedMessage(msg.getBody)
     }
   })
   var parent:Option[ActorRef] = None
@@ -100,18 +102,20 @@ class ChatSupervisor(jid:JID, password:String,
                      domain:Option[String] = None,
                      port:Option[Int] = None) extends Actor
 {
-  self.faultHandler = AllForOneStrategy(List(classOf[Throwable]), 5, 5000)
-  self.id = "chatsupervisor:%s".format(jid)
+  //self.faultHandler = AllForOneStrategy(List(classOf[Throwable]), 5, 5000)
+  //self.id = "chatsupervisor:%s".format(jid)
 
-  private val conf = new ConnectionConfiguration(domain.getOrElse(jid.domain),
-                          port.getOrElse(5222), jid.domain)
-  private val conn = new XMPPConnection(conf)
+  private val conf = XMPPTCPConnectionConfiguration.builder()
+    .setServiceName(domain.getOrElse(jid.domain))
+    .setPort(port.getOrElse(5222))
+    .setHost(jid.domain).build()
+  private val conn = new XMPPTCPConnection(conf)
   conn.connect()
   domain match {
     case Some("talk.google.com") => conn.login(jid, password)
     case _ => conn.login(jid.username, password)
   }
-  private val roster:Roster = conn.getRoster()
+  private val roster:Roster = Roster.getInstanceFor(conn);
   roster.setSubscriptionMode(Roster.SubscriptionMode.accept_all)
   conn.sendPacket( new Presence(Presence.Type.available) )
 
@@ -120,19 +124,17 @@ class ChatSupervisor(jid:JID, password:String,
 
   def receive = {
     case CreateChat(partnerJID) => {
-      val chat = conn.getChatManager().createChat(partnerJID, msglog)
+      val chat = ChatManager.getInstanceFor(conn).createChat(partnerJID, msglog)
       if ( !roster.contains(partnerJID) )
         roster.createEntry(partnerJID, partnerJID, null)
-      val chatter = Actor.actorOf(new Chatter(chat, roster)).start
-      self.link(chatter)
-      self.tryReply(chatter)
+      val chatter = context.actorOf(Props(new Chatter(chat, roster)))
+      sender ! chatter
     }
     case RemoteChatCreated(partnerJID,chat) =>
       chats.put(partnerJID,chat)
     case JoinRoom(roomId, nickname, password) => 
-      val roomChatter = Actor.actorOf(new RoomChatter(new MultiUserChat(conn, roomId), nickname.getOrElse(jid.username), password)).start()
-      self.link(roomChatter)
-      self.tryReply(roomChatter)
+      val roomChatter = context.actorOf(Props(new RoomChatter(MultiUserChatManager.getInstanceFor(conn).getMultiUserChat(roomId), nickname.getOrElse(jid.username), password)))
+      sender ! roomChatter
   }
 
   override def postStop = {
