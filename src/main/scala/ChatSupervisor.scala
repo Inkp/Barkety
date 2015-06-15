@@ -1,7 +1,9 @@
 package us.troutwine.barkety
 
 import akka.actor.{Props, AllForOneStrategy, Actor, ActorRef}
+import akka.actor.Stash
 import com.typesafe.scalalogging.slf4j.Logger
+import org.jivesoftware.smack.ConnectionConfiguration.SecurityMode
 import org.jivesoftware.smack.chat.{ChatManager, ChatMessageListener, ChatManagerListener, Chat}
 import org.jivesoftware.smack.packet.{Presence, Message}
 import org.jivesoftware.smack.roster.Roster
@@ -66,11 +68,11 @@ private class Chatter(chat:Chat, roster:Roster) extends Actor {
     case msg:String =>
       chat.sendMessage(msg)
     case msg:ReceivedMessage =>
-      parent map { _ ! InboundMessage(msg.msg) }
+      parent foreach  { _ ! InboundMessage(msg.msg) }
   }
 }
 
-class RoomChatter(muc: MultiUserChat, nickname: String, password: Option[String] = None) extends Actor {
+class RoomChatter(muc: MultiUserChat, nickname: String, password: Option[String] = None) extends Actor with Stash  {
   muc.addMessageListener(new MessageListener() {
     def processMessage(msg: Message) {
       self ! ReceivedMessage(msg.getBody)
@@ -83,16 +85,22 @@ class RoomChatter(muc: MultiUserChat, nickname: String, password: Option[String]
   override def preStart() = self ! Join
   
   override def postStop() = muc.leave() // TODO: If receiving Join blows up, will this call blow up too?
-  
-  def receive = {
+  def receive = initial
+  def initial: Receive = {
     case Join =>
       val history = new DiscussionHistory()
       history.setMaxChars(0) // Don't get anything when joining
-      muc.join(nickname, password.getOrElse(null), history, 5000)
+      muc.join(nickname, password.orNull, history, 5000)
+      unstashAll()
+      context become initialized
+    case _ => stash()
+  }
+
+  def initialized: Receive = {
     case RegisterParent(ref) =>
       parent = Some(ref)
     case msg: ReceivedMessage =>
-      parent map { _ ! InboundMessage(msg.msg) }
+      parent foreach { _ ! InboundMessage(msg.msg) }
     case msg: String => 
       muc.sendMessage(msg)
   }
@@ -108,6 +116,7 @@ class ChatSupervisor(jid:JID, password:String,
   private val conf = XMPPTCPConnectionConfiguration.builder()
     .setServiceName(domain.getOrElse(jid.domain))
     .setPort(port.getOrElse(5222))
+    .setSecurityMode(SecurityMode.disabled)
     .setHost(jid.domain).build()
   private val conn = new XMPPTCPConnection(conf)
   conn.connect()
@@ -137,7 +146,7 @@ class ChatSupervisor(jid:JID, password:String,
       sender ! roomChatter
   }
 
-  override def postStop = {
+  override def postStop() = {
     conn.disconnect()
   }
 }
